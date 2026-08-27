@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+src-tauri/target/
+.env
+.env.local
+.env*.local
+app-icon.png
+*.tgz
+.pnpm-store/
