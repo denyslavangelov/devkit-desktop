@@ -1,16 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, FolderGit2, LoaderCircle, Sparkles, X } from "lucide-react";
 import { Checkbox } from "./Checkbox";
 import {
-  createProject,
+  cloneProject,
   onCreateProjectProgress,
   type CreateProjectProgress,
-  type DevkitTemplate,
 } from "../lib/tauri";
 
 const STEPS = [
   { id: "auth", label: "Checking GitHub auth" },
-  { id: "create", label: "Creating GitHub repository" },
   { id: "clone", label: "Cloning project" },
   { id: "configure", label: "Configuring Devkit" },
   { id: "install", label: "Installing dependencies" },
@@ -22,10 +20,10 @@ type StepId = (typeof STEPS)[number]["id"];
 
 type Props = {
   open: boolean;
-  templates: DevkitTemplate[];
+  repository: string | null;
   destinationRoot: string;
   onClose: () => void;
-  onCreated: (message: string) => void;
+  onCloned: (message: string) => void;
 };
 
 async function waitForPaint() {
@@ -36,35 +34,27 @@ async function waitForPaint() {
   });
 }
 
-export function NewProjectModal({ open, templates, destinationRoot, onClose, onCreated }: Props) {
-  const [name, setName] = useState("");
-  const [templateId, setTemplateId] = useState("");
-  const [owner, setOwner] = useState("");
-  const [isPrivate, setIsPrivate] = useState(true);
+export function CloneProjectModal({
+  open,
+  repository,
+  destinationRoot,
+  onClose,
+  onCloned,
+}: Props) {
   const [installDependencies, setInstallDependencies] = useState(true);
   const [openInCursor, setOpenInCursor] = useState(true);
-  const [phase, setPhase] = useState<"form" | "creating" | "success" | "error">("form");
+  const [phase, setPhase] = useState<"form" | "cloning" | "success" | "error">("form");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Partial<Record<StepId, CreateProjectProgress>>>({});
   const wasOpen = useRef(false);
 
-  const selectedTemplate = useMemo(
-    () => templates.find((template) => template.id === templateId) ?? null,
-    [templateId, templates],
-  );
-
-  // Reset only when the modal opens, not when templates refresh mid-create.
   useEffect(() => {
     if (open && !wasOpen.current) {
-      setName("");
-      setOwner("");
-      setIsPrivate(true);
       setInstallDependencies(true);
       setOpenInCursor(true);
       setPhase("form");
       setError(null);
       setProgress({});
-      setTemplateId(templates[0]?.id ?? "");
     }
     if (!open) {
       setPhase("form");
@@ -72,10 +62,10 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
       setProgress({});
     }
     wasOpen.current = open;
-  }, [open, templates]);
+  }, [open]);
 
   useEffect(() => {
-    if (!open || phase !== "creating") return;
+    if (!open || phase !== "cloning") return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void onCreateProjectProgress((event) => {
@@ -97,16 +87,11 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
     };
   }, [open, phase]);
 
-  if (!open) return null;
+  if (!open || !repository) return null;
 
-  const busy = phase === "creating" || phase === "success";
+  const busy = phase === "cloning" || phase === "success";
   const showProgress = phase !== "form";
-
-  const canSubmit =
-    phase === "form" &&
-    name.trim().length > 0 &&
-    !!selectedTemplate &&
-    destinationRoot.trim().length > 0;
+  const canSubmit = phase === "form" && destinationRoot.trim().length > 0;
 
   const visibleSteps = STEPS.filter((step) => {
     if (step.id === "install" && !installDependencies && !progress.install) return false;
@@ -122,28 +107,24 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
     visibleSteps.find((step) => progress[step.id]?.status === "running") ??
     visibleSteps.find((step) => !progress[step.id] || progress[step.id]?.status === "pending");
 
-  async function handleCreate() {
-    if (!selectedTemplate || !canSubmit) return;
+  async function handleClone() {
+    if (!canSubmit || !repository) return;
 
-    setPhase("creating");
+    setPhase("cloning");
     setError(null);
     setProgress({
       auth: {
         step: "auth",
         status: "running",
-        message: "Starting project setup…",
+        message: "Starting clone…",
       },
     });
 
-    // Paint the loading screen before the long native create call begins.
     await waitForPaint();
 
     try {
-      const result = await createProject({
-        name: name.trim(),
-        templateRepository: selectedTemplate.repository,
-        owner: owner.trim(),
-        private: isPrivate,
+      const result = await cloneProject({
+        repository,
         destinationRoot,
         installDependencies,
         openInCursor,
@@ -154,7 +135,7 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
         ready: { step: "ready", status: "done", message: "Project is ready." },
       }));
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      onCreated(`Created ${result.repository} at ${result.path}`);
+      onCloned(`Cloned ${result.repository} to ${result.path}`);
       onClose();
     } catch (err) {
       setError(String(err));
@@ -168,28 +149,28 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
         className={`modal ${showProgress ? "modal-creating" : ""} ${phase === "success" ? "modal-success" : ""} ${phase === "error" ? "modal-danger" : ""}`}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="new-project-title"
+        aria-labelledby="clone-project-title"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-head">
           <div>
-            <h2 id="new-project-title">
+            <h2 id="clone-project-title">
               {phase === "success"
                 ? "Project ready"
-                : phase === "creating"
-                  ? "Creating project"
+                : phase === "cloning"
+                  ? "Cloning project"
                   : phase === "error"
-                    ? "Create failed"
-                    : "New project"}
+                    ? "Clone failed"
+                    : "Clone to this machine"}
             </h2>
             <p>
               {phase === "success"
                 ? "Handing off to your workspace…"
-                : phase === "creating"
-                  ? "Repo, clone, install, and local setup in progress."
+                : phase === "cloning"
+                  ? "Pulling the repo from GitHub onto this computer."
                   : phase === "error"
-                    ? "Something went wrong during creation."
-                    : "Create a GitHub repo from a template and clone it locally."}
+                    ? "Something went wrong during clone."
+                    : `Download ${repository} into your projects folder.`}
             </p>
           </div>
           <button className="icon-button" onClick={onClose} disabled={busy} aria-label="Close">
@@ -199,89 +180,30 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
 
         {!showProgress ? (
           <div className="modal-body">
-            {templates.length === 0 ? (
-              <div className="modal-empty">
-                Add at least one template in the Templates tab before creating a project.
+            <div className="form-grid">
+              <div className="field">
+                <label>Repository</label>
+                <input value={repository} readOnly />
               </div>
-            ) : (
-              <div className="form-grid">
-                <div className="field">
-                  <label htmlFor="project-name">Project name</label>
-                  <input
-                    id="project-name"
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                    placeholder="my-app"
-                    autoFocus
-                  />
-                </div>
-
-                <div className="field">
-                  <label htmlFor="project-template">Template</label>
-                  <select
-                    id="project-template"
-                    value={templateId}
-                    onChange={(event) => setTemplateId(event.target.value)}
-                  >
-                    {templates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.name} ({template.repository})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label htmlFor="project-owner">GitHub owner</label>
-                  <input
-                    id="project-owner"
-                    value={owner}
-                    onChange={(event) => setOwner(event.target.value)}
-                    placeholder="Your user or org (optional)"
-                  />
-                </div>
-
-                <div className="field">
-                  <label>Visibility</label>
-                  <div className="choice-row">
-                    <button
-                      type="button"
-                      className={`choice ${isPrivate ? "active" : ""}`}
-                      onClick={() => setIsPrivate(true)}
-                    >
-                      Private
-                    </button>
-                    <button
-                      type="button"
-                      className={`choice ${!isPrivate ? "active" : ""}`}
-                      onClick={() => setIsPrivate(false)}
-                    >
-                      Public
-                    </button>
-                  </div>
-                </div>
-
-                <div className="field">
-                  <label>Local destination</label>
-                  <input value={destinationRoot || "Choose a projects folder first"} readOnly />
-                </div>
-
-                <div className="toggle-list">
-                  <Checkbox
-                    checked={installDependencies}
-                    onChange={setInstallDependencies}
-                    label="Install dependencies after clone"
-                    description="Runs pnpm, npm, or yarn based on the project."
-                  />
-                  <Checkbox
-                    checked={openInCursor}
-                    onChange={setOpenInCursor}
-                    label="Open in Cursor when ready"
-                    description="Launch the editor after setup finishes."
-                  />
-                </div>
+              <div className="field">
+                <label>Local destination</label>
+                <input value={destinationRoot || "Choose a projects folder first"} readOnly />
               </div>
-            )}
+              <div className="toggle-list">
+                <Checkbox
+                  checked={installDependencies}
+                  onChange={setInstallDependencies}
+                  label="Install dependencies after clone"
+                  description="Runs pnpm, npm, or yarn based on the project."
+                />
+                <Checkbox
+                  checked={openInCursor}
+                  onChange={setOpenInCursor}
+                  label="Open in Cursor when ready"
+                  description="Launch the editor after setup finishes."
+                />
+              </div>
+            </div>
           </div>
         ) : (
           <div className="modal-body create-stage" aria-live="polite">
@@ -311,7 +233,7 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
             <div className="create-status-line">
               <LoaderCircle
                 size={14}
-                className={phase === "creating" ? "spin" : "create-status-idle"}
+                className={phase === "cloning" ? "spin" : "create-status-idle"}
               />
               <span>
                 {phase === "success"
@@ -338,7 +260,7 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
                 />
               </div>
               <div className="create-meter-meta">
-                <span>{phase === "creating" ? "In progress" : phase}</span>
+                <span>{phase === "cloning" ? "In progress" : phase}</span>
                 <strong>
                   {Math.round((phase === "success" ? 1 : Math.max(progressRatio, 0.12)) * 100)}%
                 </strong>
@@ -401,13 +323,13 @@ export function NewProjectModal({ open, templates, destinationRoot, onClose, onC
             {phase === "error" ? "Close" : "Cancel"}
           </button>
           {phase === "form" && (
-            <button className="primary" disabled={!canSubmit} onClick={() => void handleCreate()}>
-              Create project
+            <button className="primary" disabled={!canSubmit} onClick={() => void handleClone()}>
+              Clone project
             </button>
           )}
-          {phase === "creating" && (
+          {phase === "cloning" && (
             <button className="primary" disabled>
-              Creating…
+              Cloning…
             </button>
           )}
           {phase === "error" && (

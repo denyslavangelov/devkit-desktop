@@ -59,8 +59,13 @@ jobs:
           releaseBody: |
             ## Devkit v__VERSION__
 
-            Download the installer for your platform below.
+            ### Highlights
+            - Cross-machine project sync via GitHub (clone + list remote projects)
+            - GitHub sign-in from Settings — no terminal required
+            - Commit & push local changes; Sync all pulls then pushes
+            - UI polish: loading screens, skeletons, custom checkboxes
 
+            ### Downloads
             - **Windows:** `.msi` / `.exe`
             - **macOS Apple Silicon:** `aarch64` `.dmg` / `.app.tar.gz`
             - **macOS Intel:** `x64` `.dmg` / `.app.tar.gz`

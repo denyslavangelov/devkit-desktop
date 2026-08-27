@@ -18,6 +18,7 @@ export type ProjectSummary = {
   path: string;
   branch: string | null;
   dirty: boolean;
+  ahead: number;
   isGitRepo: boolean;
   packageManager: string | null;
 };
@@ -63,8 +64,85 @@ export type DeleteProjectResult = {
   remote: string | null;
 };
 
+export type RemoteProjectSummary = {
+  name: string;
+  repository: string;
+  updatedAt: string | null;
+  clonedLocally: boolean;
+  localPath: string | null;
+  branch: string | null;
+  dirty: boolean;
+  packageManager: string | null;
+};
+
+export type CloneProjectInput = {
+  repository: string;
+  destinationRoot: string;
+  installDependencies: boolean;
+  openInCursor: boolean;
+};
+
+export type CloneProjectResult = {
+  path: string;
+  repository: string;
+  packageManager: string | null;
+};
+
+export type SyncProjectResult = {
+  name: string;
+  path: string;
+  ok: boolean;
+  message: string;
+};
+
+export type GitCommitPushInput = {
+  path: string;
+  message?: string;
+};
+
+export type GitHubAuthStatus = {
+  ghAvailable: boolean;
+  authenticated: boolean;
+  username: string | null;
+  scopes: string[];
+  missingScopes: string[];
+  gitProtocol: string | null;
+  message: string | null;
+};
+
+export const GITHUB_TOKEN_DOCS_URL =
+  "https://github.com/settings/tokens/new?scopes=repo,delete_repo,read:org,gist&description=Devkit+Desktop";
+
 export async function getSystemInfo() {
   return invoke<SystemInfo>("system_info");
+}
+
+export async function getGitHubAuthStatus() {
+  return invoke<GitHubAuthStatus>("github_auth_status");
+}
+
+export async function githubAuthLogin() {
+  return invoke<GitHubAuthStatus>("github_auth_login");
+}
+
+export async function githubAuthLoginWithToken(token: string) {
+  return invoke<GitHubAuthStatus>("github_auth_login_with_token", { token });
+}
+
+export async function githubAuthRefresh() {
+  return invoke<GitHubAuthStatus>("github_auth_refresh");
+}
+
+export async function githubAuthLogout() {
+  return invoke<GitHubAuthStatus>("github_auth_logout");
+}
+
+export async function openExternalUrl(url: string) {
+  return invoke<void>("open_external_url", { url });
+}
+
+export async function installGithubCli() {
+  return invoke<void>("install_github_cli");
 }
 
 export async function checkTools() {
@@ -75,12 +153,24 @@ export async function listProjects(root: string) {
   return invoke<ProjectSummary[]>("list_projects", { root });
 }
 
+export async function listGithubProjects(root: string) {
+  return invoke<RemoteProjectSummary[]>("list_github_projects", { root });
+}
+
+export async function syncAllProjects(root: string) {
+  return invoke<SyncProjectResult[]>("sync_all_projects", { root });
+}
+
 export async function openInCursor(path: string) {
   return invoke<void>("open_in_cursor", { path });
 }
 
 export async function gitPull(path: string) {
   return invoke<string>("git_pull", { path });
+}
+
+export async function gitCommitPush(input: GitCommitPushInput) {
+  return invoke<string>("git_commit_push", { input });
 }
 
 export async function listTemplates() {
@@ -93,6 +183,10 @@ export async function saveTemplates(templates: DevkitTemplate[]) {
 
 export async function createProject(input: CreateProjectInput) {
   return invoke<CreateProjectResult>("create_project", { input });
+}
+
+export async function cloneProject(input: CloneProjectInput) {
+  return invoke<CloneProjectResult>("clone_project", { input });
 }
 
 export async function deleteProject(input: DeleteProjectInput) {

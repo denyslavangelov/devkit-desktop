@@ -7,7 +7,10 @@ Cross-platform desktop utility for creating, cloning, syncing and opening develo
 - Tauri 2 + React + TypeScript + Vite
 - Native tool detection for `git`, `gh`, `node`, `pnpm`, `sops`, `age-keygen`, and `cursor`
 - Projects-folder picker and local project scanning
-- Git branch + dirty status, `git pull --ff-only`
+- Git branch, dirty status, unpushed commit count
+- Pull, commit + push, and sync all (pull then push unpushed)
+- Cross-machine sync via GitHub — clone remote projects, list repos across machines
+- GitHub sign-in from Settings (browser OAuth or token — no terminal)
 - Create projects from GitHub templates
 - Delete local projects (optional GitHub remote delete)
 - Open project in Cursor
@@ -28,8 +31,8 @@ To publish a new version:
 2. Commit, then tag and push:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 That creates a GitHub Release with the built installers attached.

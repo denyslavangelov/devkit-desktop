@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, X } from "lucide-react";
+import { Checkbox } from "./Checkbox";
+import { AlertTriangle, LoaderCircle, X } from "lucide-react";
 import { deleteProject, type ProjectSummary } from "../lib/tauri";
 
 type Props = {
@@ -80,18 +81,17 @@ export function DeleteProjectModal({ open, project, projectsRoot, onClose, onDel
           </div>
 
           <div className="toggle-list">
-            <label className="toggle-row">
-              <input
-                type="checkbox"
-                checked={deleteRemote}
-                disabled={!project.isGitRepo || busy}
-                onChange={(event) => setDeleteRemote(event.target.checked)}
-              />
-              <span>
-                Also delete the GitHub repository
-                {!project.isGitRepo ? " (no git repo detected)" : ""}
-              </span>
-            </label>
+            <Checkbox
+              checked={deleteRemote}
+              onChange={setDeleteRemote}
+              disabled={!project.isGitRepo || busy}
+              label="Also delete the GitHub repository"
+              description={
+                project.isGitRepo
+                  ? "Permanent — the remote repo cannot be recovered."
+                  : "No git repo detected for this folder."
+              }
+            />
           </div>
 
           {deleteRemote && (
@@ -122,7 +122,15 @@ export function DeleteProjectModal({ open, project, projectsRoot, onClose, onDel
             Cancel
           </button>
           <button className="danger" disabled={!canDelete} onClick={() => void handleDelete()}>
-            {busy ? "Deleting…" : deleteRemote ? "Delete local + GitHub" : "Delete local project"}
+            {busy ? (
+              <>
+                <LoaderCircle size={16} className="spin" /> Deleting…
+              </>
+            ) : deleteRemote ? (
+              "Delete local + GitHub"
+            ) : (
+              "Delete local project"
+            )}
           </button>
         </div>
       </div>

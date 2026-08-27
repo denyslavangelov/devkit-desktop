@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleDot,
   Code2,
+  Download,
   FolderGit2,
   Github,
   Laptop,
@@ -13,23 +14,34 @@ import {
   RefreshCw,
   Settings,
   SlidersHorizontal,
-  TerminalSquare,
   Trash2,
+  Upload,
   Wrench,
   X,
 } from "lucide-react";
+import { Button } from "./components/Button";
+import { CommitPushModal } from "./components/CommitPushModal";
+import { CloneProjectModal } from "./components/CloneProjectModal";
+import { GitHubAuthPanel } from "./components/GitHubAuthPanel";
+import { LoadingScreen, ProjectGridSkeleton } from "./components/LoadingScreen";
 import { NewProjectModal } from "./components/NewProjectModal";
 import { DeleteProjectModal } from "./components/DeleteProjectModal";
 import {
   checkTools,
+  getGitHubAuthStatus,
   getSystemInfo,
+  gitCommitPush,
   gitPull,
+  listGithubProjects,
   listProjects,
   listTemplates,
   openInCursor,
   saveTemplates,
+  syncAllProjects,
   type DevkitTemplate,
+  type GitHubAuthStatus,
   type ProjectSummary,
+  type RemoteProjectSummary,
   type SystemInfo,
   type ToolStatus,
 } from "./lib/tauri";
@@ -42,13 +54,25 @@ function App() {
   const [view, setView] = useState<View>("projects");
   const [root, setRoot] = useState(() => localStorage.getItem(STORAGE_KEY) ?? "");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [githubProjects, setGithubProjects] = useState<RemoteProjectSummary[]>([]);
   const [templates, setTemplates] = useState<DevkitTemplate[]>([]);
+  const [githubAuth, setGithubAuth] = useState<GitHubAuthStatus | null>(null);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [booting, setBooting] = useState(true);
+  const [bootPhase, setBootPhase] = useState("Starting Devkit");
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [pullingPath, setPullingPath] = useState<string | null>(null);
+  const [pushingPath, setPushingPath] = useState<string | null>(null);
+  const [projectToPush, setProjectToPush] = useState<ProjectSummary | null>(null);
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [templateSaving, setTemplateSaving] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<ProjectSummary | null>(null);
+  const [projectToClone, setProjectToClone] = useState<RemoteProjectSummary | null>(null);
   const [templateDraft, setTemplateDraft] = useState({
     name: "",
     repository: "",
@@ -65,28 +89,68 @@ function App() {
     [tools],
   );
 
-  async function refresh() {
-    setBusy(true);
+  const remoteOnlyProjects = useMemo(
+    () => githubProjects.filter((project) => !project.clonedLocally),
+    [githubProjects],
+  );
+
+  const githubReady =
+    githubAuth?.ghAvailable &&
+    githubAuth.authenticated &&
+    githubAuth.missingScopes.length === 0;
+
+  async function loadProjects(options?: { skeleton?: boolean }) {
+    if (!root) {
+      setProjects([]);
+      setGithubProjects([]);
+      return;
+    }
+
+    if (options?.skeleton) setProjectsLoading(true);
+    try {
+      const [local, remote] = await Promise.all([
+        listProjects(root),
+        listGithubProjects(root),
+      ]);
+      setProjects(local);
+      setGithubProjects(remote);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setProjectsLoading(false);
+    }
+  }
+
+  async function refresh(options?: { skeleton?: boolean }) {
+    setRefreshing(true);
     setMessage(null);
     try {
-      const [sys, doctor, nextTemplates] = await Promise.all([
+      setBootPhase("Checking tools and GitHub");
+      const [sys, doctor, nextTemplates, auth] = await Promise.all([
         getSystemInfo(),
         checkTools(),
         listTemplates(),
+        getGitHubAuthStatus(),
       ]);
       setSystem(sys);
       setTools(doctor);
       setTemplates(nextTemplates);
-      if (root) setProjects(await listProjects(root));
+      setGithubAuth(auth);
+      setBootPhase("Loading projects");
+      await loadProjects({ skeleton: options?.skeleton });
     } catch (error) {
       setMessage(String(error));
     } finally {
-      setBusy(false);
+      setRefreshing(false);
     }
   }
 
   useEffect(() => {
-    void refresh();
+    void (async () => {
+      setBootPhase("Starting Devkit");
+      await refresh({ skeleton: Boolean(root) });
+      setBooting(false);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -99,7 +163,19 @@ function App() {
     if (typeof selected !== "string") return;
     localStorage.setItem(STORAGE_KEY, selected);
     setRoot(selected);
-    setProjects(await listProjects(selected));
+    setProjectsLoading(true);
+    try {
+      const [local, remote] = await Promise.all([
+        listProjects(selected),
+        listGithubProjects(selected),
+      ]);
+      setProjects(local);
+      setGithubProjects(remote);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setProjectsLoading(false);
+    }
   }
 
   async function handleOpen(project: ProjectSummary) {
@@ -110,16 +186,62 @@ function App() {
     }
   }
 
-  async function handlePull(project: ProjectSummary) {
-    setBusy(true);
+  async function handleSyncAll() {
+    if (!root) return;
+    setSyncingAll(true);
     try {
-      const result = await gitPull(project.path);
-      setMessage(result || "Project updated.");
-      if (root) setProjects(await listProjects(root));
+      const results = await syncAllProjects(root);
+      const failed = results.filter((result) => !result.ok);
+      if (failed.length > 0) {
+        setMessage(
+          `Synced ${results.length - failed.length}/${results.length}. ${failed[0].name}: ${failed[0].message}`,
+        );
+      } else if (results.length === 0) {
+        setMessage("No local projects to sync.");
+      } else {
+        setMessage(`Pulled latest changes for ${results.length} project(s).`);
+      }
+      await loadProjects();
     } catch (error) {
       setMessage(String(error));
     } finally {
-      setBusy(false);
+      setSyncingAll(false);
+    }
+  }
+
+  async function handlePush(project: ProjectSummary) {
+    if (project.dirty) {
+      setProjectToPush(project);
+      return;
+    }
+
+    if (project.ahead === 0) {
+      setMessage("Nothing to push.");
+      return;
+    }
+
+    setPushingPath(project.path);
+    try {
+      const result = await gitCommitPush({ path: project.path });
+      setMessage(result || "Pushed to GitHub.");
+      await loadProjects();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setPushingPath(null);
+    }
+  }
+
+  async function handlePull(project: ProjectSummary) {
+    setPullingPath(project.path);
+    try {
+      const result = await gitPull(project.path);
+      setMessage(result || "Project updated.");
+      await loadProjects();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setPullingPath(null);
     }
   }
 
@@ -132,7 +254,7 @@ function App() {
       return;
     }
 
-    setBusy(true);
+    setTemplateSaving(true);
     try {
       const next = await saveTemplates([
         ...templates,
@@ -149,25 +271,30 @@ function App() {
     } catch (error) {
       setMessage(String(error));
     } finally {
-      setBusy(false);
+      setTemplateSaving(false);
     }
   }
 
   async function handleRemoveTemplate(id: string) {
-    setBusy(true);
+    setTemplateSaving(true);
     try {
       const next = await saveTemplates(templates.filter((template) => template.id !== id));
       setTemplates(next);
     } catch (error) {
       setMessage(String(error));
     } finally {
-      setBusy(false);
+      setTemplateSaving(false);
     }
   }
 
   function openNewProject() {
     if (!root) {
       setMessage("Choose a projects folder before creating a project.");
+      return;
+    }
+    if (!githubReady) {
+      setView("settings");
+      setMessage("Connect GitHub in Settings first.");
       return;
     }
     if (templates.length === 0) {
@@ -180,6 +307,14 @@ function App() {
 
   return (
     <div className="app-shell">
+      {booting && (
+        <LoadingScreen
+          fullScreen
+          title={bootPhase}
+          subtitle="Getting your workspace ready"
+        />
+      )}
+
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
@@ -222,7 +357,8 @@ function App() {
         </div>
       </aside>
 
-      <main className="main">
+      <main className={`main ${booting ? "main-booting" : ""}`}>
+        {refreshing && !booting && <div className="refresh-strip" aria-hidden />}
         <header className="topbar">
           <div>
             <h1>
@@ -230,14 +366,19 @@ function App() {
             </h1>
             <p>
               {view === "projects"
-                ? "Your local projects, Git state and launch controls."
+                ? "Local projects, GitHub sync, and launch controls."
                 : view === "templates"
                   ? "GitHub template repositories used for New Project."
                   : "Machine setup and Devkit health."}
             </p>
           </div>
-          <button className="icon-button" onClick={() => void refresh()} disabled={busy} title="Refresh">
-            <RefreshCw size={17} className={busy ? "spin" : ""} />
+          <button
+            className="icon-button"
+            onClick={() => void refresh()}
+            disabled={refreshing || booting}
+            title="Refresh"
+          >
+            <RefreshCw size={17} className={refreshing ? "spin" : ""} />
           </button>
         </header>
 
@@ -250,8 +391,24 @@ function App() {
           </div>
         )}
 
+        {view === "projects" && !githubReady && (
+          <div className="notice github-connect-banner">
+            <Github size={16} />
+            <span>
+              {githubAuth?.ghAvailable
+                ? githubAuth.authenticated
+                  ? "GitHub needs extra permissions to create and delete repos."
+                  : "Connect GitHub to create projects and sync across your machines."
+                : "Install GitHub CLI and sign in to unlock create, clone, and sync."}
+            </span>
+            <button className="secondary" onClick={() => setView("settings")}>
+              Open Settings
+            </button>
+          </div>
+        )}
+
         {view === "projects" && (
-          <section>
+          <section className="view-panel view-active">
             <div className="section-actions">
               <div className="path-box">
                 <span className="muted">Projects folder</span>
@@ -260,6 +417,15 @@ function App() {
               <button className="secondary" onClick={() => void chooseRoot()}>
                 <SlidersHorizontal size={16} /> Choose folder
               </button>
+              <Button
+                variant="secondary"
+                icon={<RefreshCw size={16} />}
+                loading={syncingAll}
+                disabled={!root || projects.length === 0 || projectsLoading}
+                onClick={() => void handleSyncAll()}
+              >
+                Sync all
+              </Button>
               <button className="primary" onClick={openNewProject}>
                 <Plus size={16} /> New project
               </button>
@@ -272,7 +438,11 @@ function App() {
                 action="Choose folder"
                 onAction={() => void chooseRoot()}
               />
-            ) : projects.length === 0 ? (
+            ) : projectsLoading ? (
+              <div className="projects-section">
+                <ProjectGridSkeleton count={3} />
+              </div>
+            ) : projects.length === 0 && remoteOnlyProjects.length === 0 ? (
               <EmptyState
                 title="No projects found"
                 description="Create one from a GitHub template, or add repositories to this folder."
@@ -280,59 +450,152 @@ function App() {
                 onAction={openNewProject}
               />
             ) : (
-              <div className="project-grid">
-                {projects.map((project) => (
-                  <article className="project-card" key={project.path}>
-                    <div className="project-card-head">
-                      <div className="project-icon">
-                        <FolderGit2 size={20} />
-                      </div>
-                      <div className="project-title">
-                        <h3>{project.name}</h3>
-                        <span>{project.packageManager ?? "Project"}</span>
-                      </div>
-                      <div className={`status ${project.dirty ? "warn" : "good"}`}>
-                        <CircleDot size={12} />
-                        {project.dirty ? "Changes" : "Clean"}
-                      </div>
+              <>
+                <div className="projects-section">
+                  <div className="section-label">
+                    <Laptop size={15} />
+                    <span>On this machine</span>
+                    <span className="section-count">{projects.length}</span>
+                  </div>
+                  <div className="project-grid">
+                    {projects.map((project) => (
+                      <article className="project-card" key={project.path}>
+                        <div className="project-card-head">
+                          <div className="project-icon">
+                            <FolderGit2 size={20} />
+                          </div>
+                          <div className="project-title">
+                            <h3>{project.name}</h3>
+                            <span>{project.packageManager ?? "Project"}</span>
+                          </div>
+                          <div className={`status ${project.dirty ? "warn" : project.ahead > 0 ? "warn" : "good"}`}>
+                            <CircleDot size={12} />
+                            {project.dirty
+                              ? "Changes"
+                              : project.ahead > 0
+                                ? `${project.ahead} unpushed`
+                                : "Clean"}
+                          </div>
+                        </div>
+                        <div className="meta-row">
+                          <span>Branch</span>
+                          <strong>{project.branch ?? "—"}</strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>Git</span>
+                          <strong>
+                            {project.isGitRepo
+                              ? project.ahead > 0
+                                ? `${project.ahead} commit(s) to push`
+                                : "Connected"
+                              : "No repo"}
+                          </strong>
+                        </div>
+                        <div className="card-actions card-actions-git">
+                          <button className="primary grow" onClick={() => void handleOpen(project)}>
+                            <Code2 size={16} /> Open Cursor
+                          </button>
+                          <button
+                            className="secondary git-action"
+                            disabled={!project.isGitRepo || pullingPath === project.path}
+                            onClick={() => void handlePull(project)}
+                            title="Pull from GitHub"
+                          >
+                            <RefreshCw
+                              size={16}
+                              className={pullingPath === project.path ? "spin" : ""}
+                            />
+                            Pull
+                          </button>
+                          <button
+                            className="secondary git-action"
+                            disabled={
+                              !project.isGitRepo ||
+                              pushingPath === project.path ||
+                              (!project.dirty && project.ahead === 0)
+                            }
+                            onClick={() => void handlePush(project)}
+                            title={
+                              project.dirty
+                                ? "Commit and push changes"
+                                : "Push to GitHub"
+                            }
+                          >
+                            <Upload
+                              size={16}
+                              className={pushingPath === project.path ? "spin" : ""}
+                            />
+                            Push
+                          </button>
+                          <button
+                            className="icon-button danger-icon"
+                            title="Delete project"
+                            disabled={pullingPath !== null || pushingPath !== null || syncingAll}
+                            onClick={() => setProjectToDelete(project)}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+
+                {remoteOnlyProjects.length > 0 && (
+                  <div className="projects-section remote-section">
+                    <div className="section-label">
+                      <Github size={15} />
+                      <span>On GitHub — not on this machine</span>
+                      <span className="section-count">{remoteOnlyProjects.length}</span>
                     </div>
-                    <div className="meta-row">
-                      <span>Branch</span>
-                      <strong>{project.branch ?? "—"}</strong>
+                    <p className="section-hint">
+                      Created on another computer. Clone here, then Pull and Push to stay in sync.
+                    </p>
+                    <div className="project-grid">
+                      {remoteOnlyProjects.map((project) => (
+                        <article className="project-card remote-only" key={project.repository}>
+                          <div className="project-card-head">
+                            <div className="project-icon remote">
+                              <Github size={18} />
+                            </div>
+                            <div className="project-title">
+                              <h3>{project.name}</h3>
+                              <span>{project.repository}</span>
+                            </div>
+                            <div className="status remote">
+                              <CircleDot size={12} />
+                              Remote
+                            </div>
+                          </div>
+                          <div className="meta-row">
+                            <span>Updated</span>
+                            <strong>
+                              {project.updatedAt
+                                ? new Date(project.updatedAt).toLocaleDateString()
+                                : "—"}
+                            </strong>
+                          </div>
+                          <div className="card-actions">
+                            <button
+                              className="primary grow"
+                              disabled={authBusy || syncingAll}
+                              onClick={() => setProjectToClone(project)}
+                            >
+                              <Download size={16} /> Clone here
+                            </button>
+                          </div>
+                        </article>
+                      ))}
                     </div>
-                    <div className="meta-row">
-                      <span>Git</span>
-                      <strong>{project.isGitRepo ? "Connected" : "No repo"}</strong>
-                    </div>
-                    <div className="card-actions">
-                      <button className="primary grow" onClick={() => void handleOpen(project)}>
-                        <Code2 size={16} /> Open Cursor
-                      </button>
-                      <button
-                        className="secondary"
-                        disabled={!project.isGitRepo || busy}
-                        onClick={() => void handlePull(project)}
-                      >
-                        <RefreshCw size={16} /> Pull
-                      </button>
-                      <button
-                        className="icon-button danger-icon"
-                        title="Delete project"
-                        disabled={busy}
-                        onClick={() => setProjectToDelete(project)}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
+                  </div>
+                )}
+              </>
             )}
           </section>
         )}
 
         {view === "templates" && (
-          <section className="templates-layout">
+          <section className="templates-layout view-panel view-active">
             <div className="panel">
               <div className="panel-title">
                 <Github size={18} />
@@ -381,8 +644,20 @@ function App() {
                     placeholder="Optional"
                   />
                 </div>
-                <button className="primary" disabled={busy} onClick={() => void handleAddTemplate()}>
-                  <Plus size={16} /> Save template
+                <button
+                  className="primary"
+                  disabled={templateSaving}
+                  onClick={() => void handleAddTemplate()}
+                >
+                  {templateSaving ? (
+                    <>
+                      <RefreshCw size={16} className="spin" /> Saving…
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={16} /> Save template
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -409,7 +684,7 @@ function App() {
                       <button
                         className="icon-button"
                         title="Remove template"
-                        disabled={busy}
+                        disabled={templateSaving}
                         onClick={() => void handleRemoveTemplate(template.id)}
                       >
                         <Trash2 size={15} />
@@ -423,7 +698,14 @@ function App() {
         )}
 
         {view === "settings" && (
-          <section className="settings-grid">
+          <section className="settings-grid view-panel view-active">
+            <GitHubAuthPanel
+              busy={authBusy}
+              onBusyChange={setAuthBusy}
+              onMessage={setMessage}
+              onStatusChange={setGithubAuth}
+            />
+
             <div className="panel">
               <div className="panel-title">
                 <Wrench size={18} />
@@ -445,8 +727,8 @@ function App() {
               </div>
               {missingRequired.length > 0 && (
                 <div className="doctor-warning">
-                  <TerminalSquare size={16} /> Missing:{" "}
-                  {missingRequired.map((x) => x.tool).join(", ")}
+                  Missing tools: {missingRequired.map((x) => x.tool).join(", ")}. Install them from
+                  their websites — Devkit opens the links for GitHub CLI in the panel above.
                 </div>
               )}
             </div>
@@ -456,7 +738,7 @@ function App() {
                 <Github size={18} />
                 <div>
                   <h3>Project location</h3>
-                  <p>Machine-specific. Not synced to Git.</p>
+                  <p>Projects sync across machines via GitHub. Use Clone and Pull.</p>
                 </div>
               </div>
               <div className="field">
@@ -477,6 +759,25 @@ function App() {
         destinationRoot={root}
         onClose={() => setShowNewProject(false)}
         onCreated={(text) => {
+          setMessage(text);
+          void refresh();
+        }}
+      />
+      <CommitPushModal
+        open={!!projectToPush}
+        project={projectToPush}
+        onClose={() => setProjectToPush(null)}
+        onPushed={(text) => {
+          setMessage(text);
+          void loadProjects();
+        }}
+      />
+      <CloneProjectModal
+        open={!!projectToClone}
+        repository={projectToClone?.repository ?? null}
+        destinationRoot={root}
+        onClose={() => setProjectToClone(null)}
+        onCloned={(text) => {
           setMessage(text);
           void refresh();
         }}
