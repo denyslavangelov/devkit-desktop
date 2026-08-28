@@ -452,8 +452,131 @@ button:disabled { opacity: .38; cursor: not-allowed !important; }
   flex: 1;
 }
 
-.settings-grid .github-auth-panel {
+.settings-grid .github-auth-panel,
+.settings-grid .age-key-panel {
   grid-column: 1 / -1;
+}
+
+.age-key-status {
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  margin-bottom: 12px;
+}
+
+.age-key-status.ready {
+  border-color: rgba(126, 224, 176, 0.28);
+  background: rgba(126, 224, 176, 0.06);
+}
+
+.age-key-status.warn {
+  border-color: rgba(230, 180, 100, 0.28);
+}
+
+.age-key-status strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.age-key-status p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.env-install-hint {
+  color: var(--text-dim) !important;
+  font-style: italic;
+}
+
+.age-public-key {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.env-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.env-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-faint);
+}
+
+.env-badge.local {
+  border-color: rgba(126, 224, 176, 0.28);
+  color: #9fd4b0;
+}
+
+.env-badge.enc {
+  border-color: rgba(120, 170, 255, 0.28);
+  color: #9ec0ff;
+}
+
+.env-badge.warn {
+  border-color: rgba(230, 180, 100, 0.35);
+  color: #e6c07b;
+}
+
+.env-status-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.env-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.env-editor-toolbar label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.env-reveal {
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.env-editor.env-masked {
+  -webkit-text-security: disc;
+  font-family: var(--font-mono);
+}
+
+.env-modal-foot {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.env-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.modal-env {
+  width: min(620px, 100%);
 }
 
 .project-grid {

@@ -19,6 +19,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { AgeKeyPanel } from "./components/AgeKeyPanel";
 import { Button } from "./components/Button";
 import { CommitPushModal } from "./components/CommitPushModal";
 import { CloneProjectModal } from "./components/CloneProjectModal";
@@ -215,7 +216,7 @@ function App() {
       return;
     }
 
-    if (project.ahead === 0) {
+    if (project.ahead === 0 && !project.envOutOfSync) {
       setMessage("Nothing to push.");
       return;
     }
@@ -512,7 +513,7 @@ function App() {
                             disabled={
                               !project.isGitRepo ||
                               pushingPath === project.path ||
-                              (!project.dirty && project.ahead === 0)
+                              (!project.dirty && project.ahead === 0 && !project.envOutOfSync)
                             }
                             onClick={() => void handlePush(project)}
                             title={
@@ -704,6 +705,11 @@ function App() {
               onBusyChange={setAuthBusy}
               onMessage={setMessage}
               onStatusChange={setGithubAuth}
+            />
+
+            <AgeKeyPanel
+              onMessage={setMessage}
+              onToolsInstalled={() => void checkTools().then(setTools)}
             />
 
             <div className="panel">

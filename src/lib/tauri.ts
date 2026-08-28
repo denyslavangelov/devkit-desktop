@@ -21,6 +21,7 @@ export type ProjectSummary = {
   ahead: number;
   isGitRepo: boolean;
   packageManager: string | null;
+  envOutOfSync: boolean;
 };
 
 export type DevkitTemplate = {
@@ -112,6 +113,45 @@ export type GitHubAuthStatus = {
 
 export const GITHUB_TOKEN_DOCS_URL =
   "https://github.com/settings/tokens/new?scopes=repo,delete_repo,read:org,gist&description=Devkit+Desktop";
+
+export type AgeKeyStatus = {
+  hasKey: boolean;
+  publicKey: string | null;
+  sopsAvailable: boolean;
+  ageKeygenAvailable: boolean;
+  message: string | null;
+};
+
+export async function getAgeKeyStatus() {
+  return invoke<AgeKeyStatus>("age_key_status");
+}
+
+export async function generateAgeKey() {
+  return invoke<AgeKeyStatus>("generate_age_key");
+}
+
+export async function importAgeKey(secret: string) {
+  return invoke<AgeKeyStatus>("import_age_key", { input: { secret } });
+}
+
+export async function exportAgeKey() {
+  return invoke<string>("export_age_key");
+}
+
+export async function installEnvTools() {
+  return invoke<InstallEnvToolsResult>("install_env_tools");
+}
+
+export async function openSopsInstallPage() {
+  return invoke<void>("open_sops_install_page");
+}
+
+export type InstallEnvToolsResult = {
+  ok: boolean;
+  message: string;
+  sopsAvailable: boolean;
+  ageKeygenAvailable: boolean;
+};
 
 export async function getSystemInfo() {
   return invoke<SystemInfo>("system_info");

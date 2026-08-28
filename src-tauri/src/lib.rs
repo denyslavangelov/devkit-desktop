@@ -34,6 +34,7 @@ struct ProjectSummary {
     ahead: u32,
     is_git_repo: bool,
     package_manager: Option<String>,
+    env_out_of_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,12 +142,59 @@ struct GitHubAuthStatus {
     message: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgeKeyStatus {
+    has_key: bool,
+    public_key: Option<String>,
+    sops_available: bool,
+    age_keygen_available: bool,
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvStatus {
+    has_local: bool,
+    has_encrypted: bool,
+    out_of_sync: bool,
+    can_encrypt: bool,
+    can_decrypt: bool,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteEnvLocalInput {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportAgeKeyInput {
+    secret: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallEnvToolsResult {
+    ok: bool,
+    message: String,
+    sops_available: bool,
+    age_keygen_available: bool,
+}
+
 const ALLOWED_TOOLS: &[&str] = &["git", "gh", "node", "pnpm", "sops", "age-keygen", "cursor"];
 const CREATE_PROGRESS_EVENT: &str = "create-project-progress";
 const DEVKIT_GITHUB_TOPIC: &str = "devkit";
 const GITHUB_HOST: &str = "github.com";
 const REQUIRED_GITHUB_SCOPES: &[&str] = &["repo", "delete_repo", "read:org", "gist"];
 const GITHUB_CLI_INSTALL_URL: &str = "https://cli.github.com/";
+const ENV_LOCAL: &str = ".env.local";
+const ENV_ENC: &str = ".env.enc";
+const SOPS_YAML: &str = ".sops.yaml";
+const SOPS_INSTALL_URL: &str = "https://github.com/getsops/sops/releases";
 
 fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -476,12 +524,19 @@ fn tool_search_dirs() -> Vec<PathBuf> {
             home.join("Library/pnpm"),
             home.join("Library/pnpm/bin"),
             home.join(".cargo/bin"),
+            home.join("scoop/shims"),
         ]);
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local_app_data);
+        dirs.push(local.join("Microsoft/WindowsApps"));
+        dirs.push(local.join("Programs/SOPS"));
     }
     dirs.extend([
         PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
+        PathBuf::from("C:/Program Files/SOPS"),
         PathBuf::from("/usr/bin"),
         PathBuf::from("/bin"),
     ]);
@@ -837,6 +892,619 @@ fn run_git_push(path: &Path) -> Result<String, String> {
     })
 }
 
+fn age_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not resolve app config dir: {e}"))?
+        .join("age");
+    fs::create_dir_all(&dir).map_err(|e| format!("Could not create age key dir: {e}"))?;
+    Ok(dir.join("keys.txt"))
+}
+
+fn read_age_public_key(key_file: &Path) -> Result<String, String> {
+    if !key_file.is_file() {
+        return Err("No age key on this machine.".into());
+    }
+  let from_tool = resolve_tool("age-keygen").and_then(|path| {
+        Command::new(path)
+            .arg("-y")
+            .arg(key_file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    });
+    if let Some(public_key) = from_tool.filter(|key| key.starts_with("age1")) {
+        return Ok(public_key);
+    }
+
+    let raw = fs::read_to_string(key_file).map_err(|e| format!("Could not read age key: {e}"))?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with("# public key:") {
+            return Ok(line.replace("# public key:", "").trim().to_string());
+        }
+        if line.starts_with("age1") {
+            return Ok(line.to_string());
+        }
+    }
+
+    Err("Could not read the public key from your age key file.".into())
+}
+
+fn age_key_status_inner(app: &AppHandle) -> AgeKeyStatus {
+    let sops_available = resolve_tool("sops").is_some();
+    let age_keygen_available = resolve_tool("age-keygen").is_some();
+    let key_path = age_key_path(app);
+    let has_key = key_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let public_key = if has_key {
+        key_path
+            .as_ref()
+            .ok()
+            .and_then(|path| read_age_public_key(path).ok())
+    } else {
+        None
+    };
+
+    let message = if !sops_available || !age_keygen_available {
+        Some("Install sops + age below, or use Manual download.".into())
+    } else if !has_key {
+        Some("Generate or import an age key to encrypt and decrypt .env files.".into())
+    } else {
+        None
+    };
+
+    AgeKeyStatus {
+        has_key,
+        public_key,
+        sops_available,
+        age_keygen_available,
+        message,
+    }
+}
+
+fn run_sops(key_file: &Path, args: &[&str], cwd: &Path) -> Result<String, String> {
+    let mut cmd = tool_command("sops")?;
+    cmd.env("SOPS_AGE_KEY_FILE", key_file);
+    cmd.current_dir(cwd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Could not run sops: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        return Err(if stderr.is_empty() {
+            "sops command failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    Ok(stdout)
+}
+
+fn sops_yaml_content(public_key: &str) -> String {
+    format!(
+        "creation_rules:\n  - path_regex: \\.env\\.local$\n    age: '{public_key}'\n  - path_regex: \\.env\\.enc$\n    age: '{public_key}'\n"
+    )
+}
+
+fn ensure_sops_yaml(project_path: &Path, public_key: &str) -> Result<(), String> {
+    let yaml_path = project_path.join(SOPS_YAML);
+    let content = sops_yaml_content(public_key);
+
+    if yaml_path.exists() {
+        let raw = fs::read_to_string(&yaml_path)
+            .map_err(|e| format!("Could not read {SOPS_YAML}: {e}"))?;
+        if raw.contains(public_key) && raw.contains(".env\\.local") && raw.contains(".env\\.enc") {
+            return Ok(());
+        }
+    }
+
+    fs::write(&yaml_path, content).map_err(|e| format!("Could not write {SOPS_YAML}: {e}"))?;
+    Ok(())
+}
+
+fn env_paths_out_of_sync(project_path: &Path) -> bool {
+    let local = project_path.join(ENV_LOCAL);
+    let enc = project_path.join(ENV_ENC);
+    if local.exists() && !enc.exists() {
+        return true;
+    }
+    if !local.exists() || !enc.exists() {
+        return false;
+    }
+    let local_mtime = fs::metadata(&local).and_then(|m| m.modified()).ok();
+    let enc_mtime = fs::metadata(&enc).and_then(|m| m.modified()).ok();
+    match (local_mtime, enc_mtime) {
+        (Some(local_ts), Some(enc_ts)) => local_ts > enc_ts,
+        _ => false,
+    }
+}
+
+fn env_status_inner(app: &AppHandle, project_path: &Path) -> EnvStatus {
+    let key_status = age_key_status_inner(app);
+    let has_local = project_path.join(ENV_LOCAL).is_file();
+    let has_encrypted = project_path.join(ENV_ENC).is_file();
+    let out_of_sync = env_paths_out_of_sync(project_path);
+    let tools_ready = key_status.sops_available && key_status.age_keygen_available;
+    let can_encrypt = tools_ready && key_status.has_key && has_local;
+    let can_decrypt = tools_ready && key_status.has_key && has_encrypted;
+
+    let message = if !tools_ready {
+        Some("Install sops and age-keygen from Settings → ENV keys.".into())
+    } else if !key_status.has_key {
+        Some("Set up your age key in Settings → ENV keys.".into())
+    } else if has_encrypted && !has_local {
+        Some("Encrypted env found. Decrypt to create .env.local on this machine.".into())
+    } else if out_of_sync {
+        Some("Local .env.local changed — Devkit will encrypt automatically when you push.".into())
+    } else if has_local && !has_encrypted {
+        Some("Encrypt .env.local to sync secrets through GitHub.".into())
+    } else {
+        None
+    };
+
+    EnvStatus {
+        has_local,
+        has_encrypted,
+        out_of_sync,
+        can_encrypt,
+        can_decrypt,
+        message,
+    }
+}
+
+fn encrypt_env_inner(app: &AppHandle, path: &Path) -> Result<String, String> {
+    if !path.join(ENV_LOCAL).is_file() {
+        return Err(format!("{ENV_LOCAL} was not found in this project."));
+    }
+
+    let key_file = age_key_path(app)?;
+    if !key_file.is_file() {
+        return Err("No age key on this machine. Set one up in Settings → ENV keys.".into());
+    }
+
+    let public_key = read_age_public_key(&key_file)?;
+    ensure_sops_yaml(path, &public_key)?;
+
+    let encrypted = run_sops(
+        &key_file,
+        &[
+            "--encrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+            "--filename-override",
+            ENV_ENC,
+            ENV_LOCAL,
+        ],
+        path,
+    )?;
+
+    fs::write(path.join(ENV_ENC), encrypted)
+        .map_err(|e| format!("Could not write {ENV_ENC}: {e}"))?;
+
+    Ok(format!("Encrypted {ENV_LOCAL} → {ENV_ENC}."))
+}
+
+fn encrypt_env_if_needed(app: &AppHandle, path: &Path) -> Result<Option<String>, String> {
+    if !env_paths_out_of_sync(path) || !path.join(ENV_LOCAL).is_file() {
+        return Ok(None);
+    }
+    encrypt_env_inner(app, path).map(Some)
+}
+
+fn commit_and_push_project(
+    app: &AppHandle,
+    path: &Path,
+    message: Option<String>,
+) -> Result<String, String> {
+    let encrypted = encrypt_env_if_needed(app, path)?;
+    let env_was_encrypted = encrypted.is_some();
+    let dirty = working_tree_dirty(path);
+    let mut notes: Vec<String> = encrypted.into_iter().collect();
+
+    if dirty {
+        let trimmed = message.unwrap_or_default().trim().to_string();
+        let commit_message = if trimmed.is_empty() {
+            if env_was_encrypted {
+                "chore: update encrypted env".to_string()
+            } else {
+                return Err("Add a commit message for your changes.".into());
+            }
+        } else {
+            trimmed
+        };
+        if commit_message.len() > 500 {
+            return Err("Commit message is too long (max 500 characters).".into());
+        }
+        run_checked("git", &["add", "-A"], Some(path))?;
+        run_checked("git", &["commit", "-m", &commit_message], Some(path))?;
+    } else if unpushed_commit_count(path) == 0 {
+        return Ok(if notes.is_empty() {
+            "Nothing to push.".into()
+        } else {
+            notes.join(" ")
+        });
+    }
+
+    notes.push(run_git_push(path)?);
+    Ok(notes.join(" "))
+}
+
+fn decrypt_env_inner(app: &AppHandle, path: &Path) -> Result<String, String> {
+    if !path.join(ENV_ENC).is_file() {
+        return Err(format!("{ENV_ENC} was not found in this project."));
+    }
+
+    let key_file = age_key_path(app)?;
+    if !key_file.is_file() {
+        return Err("No age key on this machine. Import the same key from your other computer.".into());
+    }
+
+    let decrypted = run_sops(
+        &key_file,
+        &[
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+            "--filename-override",
+            ENV_ENC,
+            ENV_ENC,
+        ],
+        path,
+    )?;
+
+    fs::write(path.join(ENV_LOCAL), decrypted)
+        .map_err(|e| format!("Could not write {ENV_LOCAL}: {e}"))?;
+
+    Ok(format!("Decrypted {ENV_ENC} → {ENV_LOCAL}."))
+}
+
+#[tauri::command]
+fn age_key_status(app: AppHandle) -> AgeKeyStatus {
+    age_key_status_inner(&app)
+}
+
+#[tauri::command]
+fn generate_age_key(app: AppHandle) -> Result<AgeKeyStatus, String> {
+    if resolve_tool("age-keygen").is_none() {
+        return Err("age-keygen is not installed. Install sops and age from Settings → ENV keys.".into());
+    }
+
+    let key_file = age_key_path(&app)?;
+    if key_file.exists() {
+        return Err("An age key already exists on this machine.".into());
+    }
+
+    run_checked(
+        "age-keygen",
+        &["-o", key_file.to_string_lossy().as_ref()],
+        None,
+    )?;
+
+    Ok(age_key_status_inner(&app))
+}
+
+#[tauri::command]
+fn import_age_key(app: AppHandle, input: ImportAgeKeyInput) -> Result<AgeKeyStatus, String> {
+    let secret = input.secret.trim();
+    if !secret.starts_with("AGE-SECRET-KEY-") {
+        return Err("Paste a full age private key (starts with AGE-SECRET-KEY-).".into());
+    }
+
+    let key_file = age_key_path(&app)?;
+    fs::write(&key_file, format!("{secret}\n"))
+        .map_err(|e| format!("Could not save age key: {e}"))?;
+    let public_key = read_age_public_key(&key_file)?;
+    let body = format!(
+        "# Devkit age key — keep private\n# public key: {public_key}\n{secret}\n"
+    );
+    fs::write(&key_file, body).map_err(|e| format!("Could not save age key: {e}"))?;
+    Ok(age_key_status_inner(&app))
+}
+
+#[tauri::command]
+fn export_age_key(app: AppHandle) -> Result<String, String> {
+    let key_file = age_key_path(&app)?;
+    if !key_file.is_file() {
+        return Err("No age key to export.".into());
+    }
+    fs::read_to_string(&key_file).map_err(|e| format!("Could not read age key: {e}"))
+}
+
+#[tauri::command]
+fn open_sops_install_page() -> Result<(), String> {
+    open_url(SOPS_INSTALL_URL)
+}
+
+fn resolve_brew() -> Result<PathBuf, String> {
+    for candidate in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    for dir in tool_search_dirs() {
+        let candidate = dir.join("brew");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(
+        "Homebrew was not found. Install Homebrew first, or use Manual download."
+            .into(),
+    )
+}
+
+fn run_program(program: &Path, args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Could not run `{}`: {e}", program.display()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        return Err(format_command_failure(
+            program.to_string_lossy().as_ref(),
+            &stdout,
+            &stderr,
+        ));
+    }
+
+    Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+fn install_env_tools_macos() -> Result<String, String> {
+    let brew = resolve_brew()?;
+    let need_sops = resolve_tool("sops").is_none();
+    let need_age = resolve_tool("age-keygen").is_none();
+
+    if !need_sops && !need_age {
+        return Ok("sops and age-keygen are already installed.".into());
+    }
+
+  let mut args = vec!["install"];
+    if need_sops {
+        args.push("sops");
+    }
+    if need_age {
+        args.push("age");
+    }
+
+    run_program(&brew, &args, None)?;
+    Ok("Installed sops and age via Homebrew.".into())
+}
+
+fn install_env_tools_windows() -> Result<String, String> {
+    let need_sops = resolve_tool("sops").is_none();
+    let need_age = resolve_tool("age-keygen").is_none();
+
+    if !need_sops && !need_age {
+        return Ok("sops and age-keygen are already installed.".into());
+    }
+
+    if let Ok(msg) = install_env_tools_windows_winget(need_sops, need_age) {
+        if resolve_tool("sops").is_some() && resolve_tool("age-keygen").is_some() {
+            return Ok(msg);
+        }
+    }
+
+    if let Ok(msg) = install_env_tools_windows_choco(need_sops, need_age) {
+        if resolve_tool("sops").is_some() && resolve_tool("age-keygen").is_some() {
+            return Ok(msg);
+        }
+    }
+
+    let sops_ok = resolve_tool("sops").is_some();
+    let age_ok = resolve_tool("age-keygen").is_some();
+    if sops_ok && age_ok {
+        return Ok("Installed sops and age.".into());
+    }
+
+    let mut missing = Vec::new();
+    if !sops_ok {
+        missing.push("sops");
+    }
+    if !age_ok {
+        missing.push("age-keygen");
+    }
+    Err(format!(
+        "Could not install {} automatically. Try Manual download or install winget/Chocolatey.",
+        missing.join(" and ")
+    ))
+}
+
+fn install_env_tools_windows_winget(need_sops: bool, need_age: bool) -> Result<String, String> {
+    let winget = PathBuf::from("winget");
+    let accept = [
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ];
+
+    if need_sops && resolve_tool("sops").is_none() {
+        run_program(
+            &winget,
+            &[
+                "install",
+                "-e",
+                "--id",
+                "Mozilla.SOPS",
+                accept[0],
+                accept[1],
+            ],
+            None,
+        )?;
+    }
+
+    if need_age && resolve_tool("age-keygen").is_none() {
+        let age_ids = ["FiloSottile.age", "jamesog.age", "age.age"];
+        let mut installed = false;
+        for id in age_ids {
+            if run_program(
+                &winget,
+                &["install", "-e", "--id", id, accept[0], accept[1]],
+                None,
+            )
+            .is_ok()
+                && resolve_tool("age-keygen").is_some()
+            {
+                installed = true;
+                break;
+            }
+        }
+        if !installed && resolve_tool("age-keygen").is_none() {
+            return Err("winget could not install age.".into());
+        }
+    }
+
+    Ok("Installed via winget.".into())
+}
+
+fn install_env_tools_windows_choco(need_sops: bool, need_age: bool) -> Result<String, String> {
+    let choco = PathBuf::from("choco");
+    if need_sops && resolve_tool("sops").is_none() {
+        run_program(&choco, &["install", "sops", "-y"], None)?;
+    }
+    if need_age && resolve_tool("age-keygen").is_none() {
+        run_program(&choco, &["install", "age", "-y"], None)?;
+    }
+    Ok("Installed via Chocolatey.".into())
+}
+
+fn install_env_tools_inner() -> Result<InstallEnvToolsResult, String> {
+    let before_sops = resolve_tool("sops").is_some();
+    let before_age = resolve_tool("age-keygen").is_some();
+
+    if before_sops && before_age {
+        return Ok(InstallEnvToolsResult {
+            ok: true,
+            message: "sops and age-keygen are already installed.".into(),
+            sops_available: true,
+            age_keygen_available: true,
+        });
+    }
+
+    let install_message = match std::env::consts::OS {
+        "macos" => install_env_tools_macos(),
+        "windows" => install_env_tools_windows(),
+        other => Err(format!(
+            "Automatic install is not supported on {other}. Use Manual download."
+        )),
+    };
+
+    let sops_available = resolve_tool("sops").is_some();
+    let age_keygen_available = resolve_tool("age-keygen").is_some();
+
+    match install_message {
+        Ok(message) => {
+            let mut parts = vec![message];
+            if sops_available && !before_sops {
+                parts.push("sops is ready.".into());
+            }
+            if age_keygen_available && !before_age {
+                parts.push("age-keygen is ready.".into());
+            }
+            if !sops_available || !age_keygen_available {
+                parts.push(
+                    "Some tools are still missing. Try Check again or Manual download.".into(),
+                );
+            }
+            Ok(InstallEnvToolsResult {
+                ok: sops_available && age_keygen_available,
+                message: parts.join(" "),
+                sops_available,
+                age_keygen_available,
+            })
+        }
+        Err(err) => {
+            if sops_available && age_keygen_available {
+                Ok(InstallEnvToolsResult {
+                    ok: true,
+                    message: "Tools are now available.".into(),
+                    sops_available: true,
+                    age_keygen_available: true,
+                })
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn install_env_tools() -> Result<InstallEnvToolsResult, String> {
+    tauri::async_runtime::spawn_blocking(install_env_tools_inner)
+        .await
+        .map_err(|e| format!("Install failed: {e}"))?
+}
+
+#[tauri::command]
+fn install_sops() -> Result<(), String> {
+    open_url(SOPS_INSTALL_URL)
+}
+
+#[tauri::command]
+fn env_status(app: AppHandle, path: String) -> Result<EnvStatus, String> {
+    let path = safe_existing_dir(&path)?;
+    Ok(env_status_inner(&app, &path))
+}
+
+#[tauri::command]
+fn read_env_local(path: String) -> Result<String, String> {
+    let path = safe_existing_dir(&path)?;
+    let env_path = path.join(ENV_LOCAL);
+    if !env_path.is_file() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(&env_path).map_err(|e| format!("Could not read {ENV_LOCAL}: {e}"))
+}
+
+#[tauri::command]
+fn write_env_local(input: WriteEnvLocalInput) -> Result<(), String> {
+    let path = safe_existing_dir(&input.path)?;
+    fs::write(path.join(ENV_LOCAL), &input.content)
+        .map_err(|e| format!("Could not write {ENV_LOCAL}: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn encrypt_env(app: AppHandle, path: String) -> Result<String, String> {
+    let path = safe_existing_dir(&path)?;
+    encrypt_env_inner(&app, &path)
+}
+
+#[tauri::command]
+fn decrypt_env(app: AppHandle, path: String) -> Result<String, String> {
+    let path = safe_existing_dir(&path)?;
+    decrypt_env_inner(&app, &path)
+}
+
 fn project_summary(path: &Path) -> ProjectSummary {
     let is_git_repo = path.join(".git").exists();
     let branch = if is_git_repo {
@@ -867,6 +1535,7 @@ fn project_summary(path: &Path) -> ProjectSummary {
         ahead,
         is_git_repo,
         package_manager: detect_package_manager(path),
+        env_out_of_sync: env_paths_out_of_sync(path),
     }
 }
 
@@ -969,7 +1638,7 @@ fn list_github_projects(root: String) -> Result<Vec<RemoteProjectSummary>, Strin
 }
 
 #[tauri::command]
-fn sync_all_projects(root: String) -> Result<Vec<SyncProjectResult>, String> {
+fn sync_all_projects(app: AppHandle, root: String) -> Result<Vec<SyncProjectResult>, String> {
     let projects = list_projects(root)?;
     let mut results = Vec::new();
 
@@ -1006,16 +1675,14 @@ fn sync_all_projects(root: String) -> Result<Vec<SyncProjectResult>, String> {
                     };
 
                     let dirty = working_tree_dirty(&path);
-                    let ahead = unpushed_commit_count(&path);
                     let message = if dirty {
                         format!("{pull_msg} Push skipped — commit your changes first.")
-                    } else if ahead > 0 {
-                        match run_git_push(&path) {
+                    } else {
+                        match commit_and_push_project(&app, &path, None) {
+                            Ok(push_msg) if push_msg == "Nothing to push." => pull_msg,
                             Ok(push_msg) => format!("{pull_msg} {push_msg}"),
                             Err(err) => format!("{pull_msg} Push failed: {err}"),
                         }
-                    } else {
-                        pull_msg
                     };
 
                     results.push(SyncProjectResult {
@@ -1100,33 +1767,13 @@ struct GitCommitPushInput {
 }
 
 #[tauri::command]
-fn git_commit_push(input: GitCommitPushInput) -> Result<String, String> {
+fn git_commit_push(app: AppHandle, input: GitCommitPushInput) -> Result<String, String> {
     let path = safe_existing_dir(&input.path)?;
     if !path.join(".git").exists() {
         return Err("This folder is not a Git repository.".into());
     }
 
-    let dirty = working_tree_dirty(&path);
-
-    if dirty {
-        let message = input
-            .message
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if message.is_empty() {
-            return Err("Add a commit message for your changes.".into());
-        }
-        if message.len() > 500 {
-            return Err("Commit message is too long (max 500 characters).".into());
-        }
-        run_checked("git", &["add", "-A"], Some(&path))?;
-        run_checked("git", &["commit", "-m", &message], Some(&path))?;
-    } else if unpushed_commit_count(&path) == 0 {
-        return Ok("Nothing to push.".into());
-    }
-
-    run_git_push(&path)
+    commit_and_push_project(&app, &path, input.message)
 }
 
 fn templates_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1652,6 +2299,24 @@ fn clone_project_inner(app: AppHandle, input: CloneProjectInput) -> Result<Clone
     register_github_project(&repository, Some(&destination));
     emit_progress(&app, "configure", "done", None);
 
+    if destination.join(ENV_ENC).exists() {
+        emit_progress(
+            &app,
+            "env",
+            "running",
+            Some("Decrypting environment file…".into()),
+        );
+        match decrypt_env_inner(&app, &destination) {
+            Ok(msg) => emit_progress(&app, "env", "done", Some(msg)),
+            Err(e) => emit_progress(
+                &app,
+                "env",
+                "done",
+                Some(format!("Skipped env decrypt: {e}")),
+            ),
+        }
+    }
+
     let mut package_manager = detect_package_manager(&destination);
     if input.install_dependencies {
         emit_progress(
@@ -1758,6 +2423,18 @@ pub fn run() {
             github_auth_logout,
             open_external_url,
             install_github_cli,
+            age_key_status,
+            generate_age_key,
+            import_age_key,
+            export_age_key,
+            install_env_tools,
+            open_sops_install_page,
+            install_sops,
+            env_status,
+            read_env_local,
+            write_env_local,
+            encrypt_env,
+            decrypt_env,
             list_projects,
             list_github_projects,
             sync_all_projects,

@@ -7,19 +7,30 @@ type Props = {
   project: ProjectSummary | null;
   onClose: () => void;
   onPushed: (message: string) => void;
+  title?: string;
+  description?: string;
+  defaultMessage?: string;
 };
 
-export function CommitPushModal({ open, project, onClose, onPushed }: Props) {
+export function CommitPushModal({
+  open,
+  project,
+  onClose,
+  onPushed,
+  title = "Commit and push",
+  description = "Save local changes to GitHub so your other machines can pull them.",
+  defaultMessage = "",
+}: Props) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    setMessage("");
+    setMessage(defaultMessage);
     setBusy(false);
     setError(null);
-  }, [open, project?.path]);
+  }, [open, project?.path, defaultMessage]);
 
   if (!open || !project) return null;
 
@@ -53,10 +64,8 @@ export function CommitPushModal({ open, project, onClose, onPushed }: Props) {
       >
         <div className="modal-head">
           <div>
-            <h2 id="commit-push-title">Commit and push</h2>
-            <p>
-              Save local changes to GitHub so your other machines can pull them.
-            </p>
+            <h2 id="commit-push-title">{title}</h2>
+            <p>{description}</p>
           </div>
           <button className="icon-button" onClick={onClose} disabled={busy} aria-label="Close">
             <X size={16} />

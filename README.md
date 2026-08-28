@@ -9,6 +9,7 @@ Cross-platform desktop utility for creating, cloning, syncing and opening develo
 - Projects-folder picker and local project scanning
 - Git branch, dirty status, unpushed commit count
 - Pull, commit + push, and sync all (pull then push unpushed)
+- Encrypted env sync: edit `.env.local` in your editor — Devkit encrypts on push and decrypts on clone (no env UI)
 - Cross-machine sync via GitHub — clone remote projects, list repos across machines
 - GitHub sign-in from Settings (browser OAuth or token — no terminal)
 - Create projects from GitHub templates
@@ -27,12 +28,12 @@ See the [Releases](../../releases) page for downloads.
 
 To publish a new version:
 
-1. Bump `version` in `package.json` and `src-tauri/tauri.conf.json`
+1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`
 2. Commit, then tag and push:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin main v0.3.0
 ```
 
 That creates a GitHub Release with the built installers attached.
